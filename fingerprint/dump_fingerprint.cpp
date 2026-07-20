@@ -18,6 +18,7 @@
 #include <log/log.h>
 #include <stdio.h>
 #include <string.h>
+#include <memory>
 
 static constexpr const char *kTombstonesDirPath = "/data/vendor/tombstones/fingerprint/";
 

@@ -15,6 +15,7 @@
  */
 #include <inttypes.h>
 #include <stdio.h>
+#include <cstdlib>
 #include <string>
 #include <android-base/file.h>
 #include <android-base/stringprintf.h>

@@ -18,6 +18,7 @@
 #include <android-base/file.h>
 #include <stdio.h>
 #include <log/log.h>
+#include <memory>
 
 char* concat(char* result, const char* one, const char* two){
   strcpy(result, one);
