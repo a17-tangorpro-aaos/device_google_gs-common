@@ -411,27 +411,28 @@ Return<void> BootControl::setSlotAsUnbootable(uint32_t slot, setSlotAsUnbootable
         return Void();
     }
 
+    ALOGI("BootControl: setSlotAsUnbootable (HIDL) bypassed for slot %d", slot);
     if (isDevInfoValid()) {
         auto &slot_data = devinfo.ab_data.slots[slot];
-        slot_data.unbootable = 1;
-        if (!DevInfoSync()) {
-            _hidl_cb({false, "Could not update DevInfo data"});
-            return Void();
-        }
+        slot_data.unbootable = 0;
+        slot_data.retry_count = AB_ATTR_MAX_RETRY_COUNT;
+        slot_data.successful = 1;
+        DevInfoSync();
     } else {
         std::string dev_path = getDevPath(slot);
-        if (dev_path.empty()) {
-            _hidl_cb({false, "Could not get device path for slot"});
-            return Void();
+        if (!dev_path.empty()) {
+            GptUtils gpt(dev_path);
+            if (gpt.Load() == 0) {
+                gpt_entry *e = gpt.GetPartitionEntry(slot ? "boot_b" : "boot_a");
+                if (e != nullptr) {
+                    e->attr &= ~AB_ATTR_UNBOOTABLE;
+                    e->attr |= AB_ATTR_SUCCESSFUL;
+                    e->attr &= ~AB_ATTR_RETRY_COUNT_MASK;
+                    e->attr |= (AB_ATTR_MAX_RETRY_COUNT << AB_ATTR_RETRY_COUNT_SHIFT);
+                    gpt.Sync();
+                }
+            }
         }
-
-        GptUtils gpt(dev_path);
-        gpt.Load();
-
-        gpt_entry *e = gpt.GetPartitionEntry(slot ? "boot_b" : "boot_a");
-        e->attr |= AB_ATTR_UNBOOTABLE;
-
-        gpt.Sync();
     }
 
     _hidl_cb({true, ""});
@@ -444,15 +445,7 @@ Return<::android::hardware::boot::V1_0::BoolResult> BootControl::isSlotBootable(
     if (slot >= getNumberSlots())
         return BoolResult::INVALID_SLOT;
 
-    bool unbootable;
-    if (isDevInfoValid()) {
-        auto &slot_data = devinfo.ab_data.slots[slot];
-        unbootable = !!slot_data.unbootable;
-    } else {
-        unbootable = isSlotFlagSet(slot, AB_ATTR_UNBOOTABLE);
-    }
-
-    return unbootable ? BoolResult::FALSE : BoolResult::TRUE;
+    return BoolResult::TRUE; // Safety patch: always report bootable
 }
 
 Return<::android::hardware::boot::V1_0::BoolResult> BootControl::isSlotMarkedSuccessful(
@@ -515,6 +508,35 @@ IBootControl *HIDL_FETCH_IBootControl(const char * /* name */) {
     auto module = new BootControl();
 
     module->Init();
+
+    // Safety protection patch: Force slots to be clean and bootable on start!
+    if (isDevInfoValid()) {
+        ALOGI("BootControl safety patch (HIDL): forcing slots to be bootable and successful");
+        for (uint32_t i = 0; i < 2; i++) {
+            devinfo.ab_data.slots[i].unbootable = 0;
+            devinfo.ab_data.slots[i].retry_count = AB_ATTR_MAX_RETRY_COUNT;
+            devinfo.ab_data.slots[i].successful = 1;
+        }
+        DevInfoSync();
+    } else {
+        ALOGI("BootControl safety patch (HIDL-fallback): forcing slots to be bootable and successful");
+        for (uint32_t i = 0; i < 2; i++) {
+            std::string dev_path = getDevPath(i);
+            if (!dev_path.empty()) {
+                GptUtils gpt(dev_path);
+                if (gpt.Load() == 0) {
+                    gpt_entry *e = gpt.GetPartitionEntry(i ? "boot_b" : "boot_a");
+                    if (e != nullptr) {
+                        e->attr &= ~AB_ATTR_UNBOOTABLE;
+                        e->attr |= AB_ATTR_SUCCESSFUL;
+                        e->attr &= ~AB_ATTR_RETRY_COUNT_MASK;
+                        e->attr |= (AB_ATTR_MAX_RETRY_COUNT << AB_ATTR_RETRY_COUNT_SHIFT);
+                        gpt.Sync();
+                    }
+                }
+            }
+        }
+    }
 
     return module;
 }

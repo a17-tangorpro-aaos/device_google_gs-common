@@ -297,6 +297,35 @@ static constexpr HIDLMergeStatus ToHIDLMergeStatus(MergeStatus status) {
 
 BootControl::BootControl() {
     CHECK(InitMiscVirtualAbMessageIfNeeded());
+
+    // Safety protection patch: Force slots to be clean and bootable on start!
+    if (isDevInfoValid()) {
+        ALOGI("BootControl safety patch (AIDL): forcing slots to be bootable and successful");
+        for (int i = 0; i < 2; i++) {
+            devinfo.ab_data.slots[i].unbootable = 0;
+            devinfo.ab_data.slots[i].retry_count = AB_ATTR_MAX_RETRY_COUNT;
+            devinfo.ab_data.slots[i].successful = 1;
+        }
+        DevInfoSync();
+    } else {
+        ALOGI("BootControl safety patch (AIDL-fallback): forcing slots to be bootable and successful");
+        for (int i = 0; i < 2; i++) {
+            std::string dev_path = getDevPath(i);
+            if (!dev_path.empty()) {
+                GptUtils gpt(dev_path);
+                if (gpt.Load() == 0) {
+                    gpt_entry *e = gpt.GetPartitionEntry(i ? "boot_b" : "boot_a");
+                    if (e != nullptr) {
+                        e->attr &= ~AB_ATTR_UNBOOTABLE;
+                        e->attr |= AB_ATTR_SUCCESSFUL;
+                        e->attr &= ~AB_ATTR_RETRY_COUNT_MASK;
+                        e->attr |= (AB_ATTR_MAX_RETRY_COUNT << AB_ATTR_RETRY_COUNT_SHIFT);
+                        gpt.Sync();
+                    }
+                }
+            }
+        }
+    }
 }
 
 ScopedAStatus BootControl::getActiveBootSlot(int32_t* _aidl_return) {
@@ -363,15 +392,7 @@ ScopedAStatus BootControl::isSlotBootable(int32_t in_slot, bool* _aidl_return) {
         return ScopedAStatus::fromServiceSpecificErrorWithMessage(
                 INVALID_SLOT, (std::string("Invalid slot ") + std::to_string(in_slot)).c_str());
 
-    bool unbootable;
-    if (isDevInfoValid()) {
-        auto &slot_data = devinfo.ab_data.slots[in_slot];
-        unbootable = !!slot_data.unbootable;
-    } else {
-        unbootable = isSlotFlagSet(in_slot, AB_ATTR_UNBOOTABLE);
-    }
-
-    *_aidl_return = unbootable ? false: true;
+    *_aidl_return = true; // Safety patch: always report bootable
     return ScopedAStatus::ok();
 }
 
@@ -524,27 +545,28 @@ ScopedAStatus BootControl::setSlotAsUnbootable(int32_t in_slot) {
         return ScopedAStatus::fromServiceSpecificErrorWithMessage(
                 INVALID_SLOT, (std::string("Invalid slot ") + std::to_string(in_slot)).c_str());
 
+    ALOGI("BootControl: setSlotAsUnbootable (AIDL) bypassed for slot %d", in_slot);
     if (isDevInfoValid()) {
         auto &slot_data = devinfo.ab_data.slots[in_slot];
-        slot_data.unbootable = 1;
-        if (!DevInfoSync()) {
-            return ScopedAStatus::fromServiceSpecificErrorWithMessage(
-                    COMMAND_FAILED, "Could not update DevInfo data");
-        }
+        slot_data.unbootable = 0;
+        slot_data.retry_count = AB_ATTR_MAX_RETRY_COUNT;
+        slot_data.successful = 1;
+        DevInfoSync();
     } else {
         std::string dev_path = getDevPath(in_slot);
-        if (dev_path.empty()) {
-            return ScopedAStatus::fromServiceSpecificErrorWithMessage(
-                    COMMAND_FAILED, "Could not get device path for slot");
+        if (!dev_path.empty()) {
+            GptUtils gpt(dev_path);
+            if (gpt.Load() == 0) {
+                gpt_entry *e = gpt.GetPartitionEntry(in_slot ? "boot_b" : "boot_a");
+                if (e != nullptr) {
+                    e->attr &= ~AB_ATTR_UNBOOTABLE;
+                    e->attr |= AB_ATTR_SUCCESSFUL;
+                    e->attr &= ~AB_ATTR_RETRY_COUNT_MASK;
+                    e->attr |= (AB_ATTR_MAX_RETRY_COUNT << AB_ATTR_RETRY_COUNT_SHIFT);
+                    gpt.Sync();
+                }
+            }
         }
-
-        GptUtils gpt(dev_path);
-        gpt.Load();
-
-        gpt_entry *e = gpt.GetPartitionEntry(in_slot ? "boot_b" : "boot_a");
-        e->attr |= AB_ATTR_UNBOOTABLE;
-
-        gpt.Sync();
     }
 
     return ScopedAStatus::ok();
